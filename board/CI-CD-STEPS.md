@@ -67,8 +67,20 @@ Also ensure this IAM identity is mapped in EKS access so `kubectl apply` is allo
 - Job type: Pipeline (or Multibranch Pipeline)
 - Repository: this repo
 - Script path: `board/Jenkinsfile`
+- Build trigger: `GitHub hook trigger for GITScm polling`
 
-## 8) Run and verify
+## 8) Configure GitHub webhook
+
+In your GitHub repository settings, add a webhook:
+
+- Payload URL: `http://<jenkins-url>/github-webhook/`
+- Content type: `application/json`
+- Events: `Just the push event`
+
+If you also want PR-based automation, use a multibranch pipeline with the
+GitHub Branch Source plugin and enable pull request discovery there.
+
+## 9) Run and verify
 
 Pipeline stages:
 

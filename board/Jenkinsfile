@@ -1,6 +1,10 @@
 pipeline {
     agent { label 'linux' }
 
+    triggers {
+        githubPush()
+    }
+
     options {
         disableConcurrentBuilds()
         timeout(time: 60, unit: 'MINUTES')
