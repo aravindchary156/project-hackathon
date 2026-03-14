@@ -1,7 +1,6 @@
 pipeline {
     agent any
-    ...
-}
+
     triggers {
         githubPush()
     }
@@ -12,15 +11,15 @@ pipeline {
     }
 
     environment {
-        AWS_REGION = 'ap-south-1'
-        ECR_ACCOUNT_ID = '049419513053'
-        ECR_REPOSITORY = 'boardgame'
-        EKS_CLUSTER_NAME = 'hackathon-eks'
+        AWS_REGION         = 'ap-south-1'
+        ECR_ACCOUNT_ID     = '049419513053'
+        ECR_REPOSITORY     = 'boardgame'
+        EKS_CLUSTER_NAME   = 'hackathon-eks'
         EKS_NODEGROUP_NAME = 'hackathon-eks-ng'
-        K8S_NAMESPACE = 'default'
-        IMAGE_TAG = "${BUILD_NUMBER}"
-        IMAGE_URI = "${ECR_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPOSITORY}:${IMAGE_TAG}"
-        TRIVY_CACHE_DIR = "${WORKSPACE}/.trivycache"
+        K8S_NAMESPACE      = 'default'
+        IMAGE_TAG          = "${BUILD_NUMBER}"
+        IMAGE_URI          = "${ECR_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPOSITORY}:${IMAGE_TAG}"
+        TRIVY_CACHE_DIR    = "${WORKSPACE}/.trivycache"
     }
 
     stages {
@@ -32,19 +31,23 @@ pipeline {
 
         stage('Build + Unit Test') {
             steps {
-                dir('board') {
-                    sh 'mvn -B clean verify'
-                }
+                sh '''
+                  sed -i 's/\\r$//' mvnw
+                  chmod +x mvnw
+                  ./mvnw -B clean verify
+                '''
             }
         }
 
         stage('SonarQube Analysis') {
             steps {
-                dir('board') {
-                    withCredentials([string(credentialsId: 'sonar-token', variable: 'SONAR_TOKEN')]) {
-                        withSonarQubeEnv('sonarqube-server') {
-                            sh 'mvn -B sonar:sonar -Dsonar.token=$SONAR_TOKEN'
-                        }
+                withCredentials([string(credentialsId: 'sonar-token', variable: 'SONAR_TOKEN')]) {
+                    withSonarQubeEnv('sonarqube') {
+                        sh '''
+                          sed -i 's/\\r$//' mvnw
+                          chmod +x mvnw
+                          ./mvnw -B sonar:sonar -Dsonar.token=$SONAR_TOKEN
+                        '''
                     }
                 }
             }
@@ -60,10 +63,10 @@ pipeline {
 
         stage('Build Docker Image') {
             steps {
-                dir('board') {
-                    sh 'docker build -t ${ECR_REPOSITORY}:${IMAGE_TAG} .'
-                    sh 'docker tag ${ECR_REPOSITORY}:${IMAGE_TAG} ${IMAGE_URI}'
-                }
+                sh '''
+                  docker build -t ${ECR_REPOSITORY}:${IMAGE_TAG} .
+                  docker tag ${ECR_REPOSITORY}:${IMAGE_TAG} ${IMAGE_URI}
+                '''
             }
         }
 
@@ -71,7 +74,13 @@ pipeline {
             steps {
                 sh '''
                   mkdir -p "${TRIVY_CACHE_DIR}"
-                  trivy image --cache-dir "${TRIVY_CACHE_DIR}" --exit-code 0 --severity CRITICAL "${IMAGE_URI}"
+                  docker run --rm \
+                    -v /var/run/docker.sock:/var/run/docker.sock \
+                    -v "${TRIVY_CACHE_DIR}:/root/.cache/" \
+                    aquasec/trivy:latest image \
+                    --exit-code 0 \
+                    --severity CRITICAL,HIGH \
+                    "${IMAGE_URI}"
                 '''
             }
         }
@@ -81,7 +90,6 @@ pipeline {
                 sh 'aws sts get-caller-identity --region ${AWS_REGION}'
             }
         }
-
 
         stage('Push Image To ECR') {
             steps {
@@ -96,36 +104,34 @@ pipeline {
 
         stage('Deploy To EKS') {
             steps {
-                dir('board') {
-                    sh '''
-                      export AWS_REGION="${AWS_REGION}"
-                      if aws --version 2>&1 | grep -q "aws-cli/1"; then
-                        curl -sS "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "/tmp/awscliv2.zip"
-                        unzip -oq /tmp/awscliv2.zip -d /tmp
-                        sudo /tmp/aws/install --update
-                      fi
-                      /usr/local/bin/aws --version || aws --version
-                      /usr/local/bin/aws eks update-nodegroup-config --region ${AWS_REGION} --cluster-name ${EKS_CLUSTER_NAME} --nodegroup-name ${EKS_NODEGROUP_NAME} --scaling-config minSize=2,maxSize=3,desiredSize=2 || true
-                      for i in $(seq 1 30); do
-                        NODEGROUP_STATUS=$(/usr/local/bin/aws eks describe-nodegroup --region ${AWS_REGION} --cluster-name ${EKS_CLUSTER_NAME} --nodegroup-name ${EKS_NODEGROUP_NAME} --query 'nodegroup.status' --output text)
-                        if [ "${NODEGROUP_STATUS}" = "ACTIVE" ]; then
-                          break
-                        fi
-                        echo "Nodegroup status: ${NODEGROUP_STATUS}. Waiting..."
-                        sleep 20
-                      done
-                      /usr/local/bin/aws eks update-kubeconfig --region ${AWS_REGION} --name ${EKS_CLUSTER_NAME}
-                      sed -i 's#command: aws#command: /usr/local/bin/aws#g' /home/ubuntu/.kube/config || true
-                      sed -i 's#client.authentication.k8s.io/v1alpha1#client.authentication.k8s.io/v1beta1#g' /home/ubuntu/.kube/config || true
-                      sed -i 's#client.authentication.k8s.io/v1alpha1#client.authentication.k8s.io/v1#g' /home/ubuntu/.kube/config || true
-                      sed "s|IMAGE_PLACEHOLDER|${IMAGE_URI}|g" k8s/deployment-service.yaml > k8s/rendered-deployment.yaml
-                      kubectl apply -n ${K8S_NAMESPACE} -f k8s/rendered-deployment.yaml
-                      kubectl delete pod -n ${K8S_NAMESPACE} -l app=boardgame --field-selector=status.phase=Pending --ignore-not-found=true || true
-                      kubectl rollout status -n ${K8S_NAMESPACE} deployment/boardgame-deployment --timeout=600s || (kubectl get pods -n ${K8S_NAMESPACE} -o wide; kubectl describe deployment boardgame-deployment -n ${K8S_NAMESPACE}; kubectl describe pods -n ${K8S_NAMESPACE} -l app=boardgame; kubectl logs -n ${K8S_NAMESPACE} -l app=boardgame --tail=200; exit 1)
-                      kubectl get pods -n ${K8S_NAMESPACE} -o wide
-                      kubectl get svc -n ${K8S_NAMESPACE}
-                    '''
-                }
+                sh '''
+                  export AWS_REGION="${AWS_REGION}"
+                  if aws --version 2>&1 | grep -q "aws-cli/1"; then
+                    curl -sS "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "/tmp/awscliv2.zip"
+                    unzip -oq /tmp/awscliv2.zip -d /tmp
+                    sudo /tmp/aws/install --update
+                  fi
+                  /usr/local/bin/aws --version || aws --version
+                  /usr/local/bin/aws eks update-nodegroup-config --region ${AWS_REGION} --cluster-name ${EKS_CLUSTER_NAME} --nodegroup-name ${EKS_NODEGROUP_NAME} --scaling-config minSize=2,maxSize=3,desiredSize=2 || true
+                  for i in $(seq 1 30); do
+                    NODEGROUP_STATUS=$(/usr/local/bin/aws eks describe-nodegroup --region ${AWS_REGION} --cluster-name ${EKS_CLUSTER_NAME} --nodegroup-name ${EKS_NODEGROUP_NAME} --query 'nodegroup.status' --output text)
+                    if [ "${NODEGROUP_STATUS}" = "ACTIVE" ]; then
+                      break
+                    fi
+                    echo "Nodegroup status: ${NODEGROUP_STATUS}. Waiting..."
+                    sleep 20
+                  done
+                  /usr/local/bin/aws eks update-kubeconfig --region ${AWS_REGION} --name ${EKS_CLUSTER_NAME}
+                  sed -i 's#command: aws#command: /usr/local/bin/aws#g' /home/ubuntu/.kube/config || true
+                  sed -i 's#client.authentication.k8s.io/v1alpha1#client.authentication.k8s.io/v1beta1#g' /home/ubuntu/.kube/config || true
+                  sed -i 's#client.authentication.k8s.io/v1alpha1#client.authentication.k8s.io/v1#g' /home/ubuntu/.kube/config || true
+                  sed "s|IMAGE_PLACEHOLDER|${IMAGE_URI}|g" k8s/deployment-service.yaml > k8s/rendered-deployment.yaml
+                  kubectl apply -n ${K8S_NAMESPACE} -f k8s/rendered-deployment.yaml
+                  kubectl delete pod -n ${K8S_NAMESPACE} -l app=boardgame --field-selector=status.phase=Pending --ignore-not-found=true || true
+                  kubectl rollout status -n ${K8S_NAMESPACE} deployment/boardgame-deployment --timeout=600s || (kubectl get pods -n ${K8S_NAMESPACE} -o wide; kubectl describe deployment boardgame-deployment -n ${K8S_NAMESPACE}; kubectl describe pods -n ${K8S_NAMESPACE} -l app=boardgame; kubectl logs -n ${K8S_NAMESPACE} -l app=boardgame --tail=200; exit 1)
+                  kubectl get pods -n ${K8S_NAMESPACE} -o wide
+                  kubectl get svc -n ${K8S_NAMESPACE}
+                '''
             }
         }
     }
