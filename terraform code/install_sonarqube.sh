@@ -17,8 +17,9 @@ retry() {
 }
 
 retry 5 sudo apt update -y
-# Avoid pulling recommends (fonts-dejavu-extra) which aren't available on some Ubuntu cloud images
-retry 5 sudo apt install -y --no-install-recommends docker.io curl ca-certificates openjdk-17-jre
+retry 3 sudo apt install -y --no-install-recommends software-properties-common
+retry 3 sudo add-apt-repository -y universe || true
+retry 5 sudo apt install -y --no-install-recommends docker.io curl ca-certificates openjdk-17-jre-headless
 
 sudo systemctl enable --now docker
 sudo usermod -aG docker ubuntu || true
